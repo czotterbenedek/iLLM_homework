@@ -10,7 +10,7 @@ bpmn-js (zoom, pan, SVG/BPMN download).
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-ollama pull llama3.2:3b
+ollama pull qwen2.5:7b
 streamlit run app.py
 ```
 
@@ -18,7 +18,7 @@ Configure Ollama in `.env` (see [.env.example](./.env.example)):
 
 ```env
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2:3b
+OLLAMA_MODEL=qwen2.5:7b
 OLLAMA_API_KEY=ollama
 COPILOT_TIMEOUT=300
 BPMN_MAX_CORRECTIONS=2
