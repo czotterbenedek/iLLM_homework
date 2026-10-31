@@ -1,3 +1,92 @@
 <!doctype html>
-<html><head><meta charset="UTF-8"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/diagram-js.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/bpmn-font/css/bpmn-embedded.css"></head>
-<body><div id="canvas" style="height:520px"></div><div id="error" role="alert" style="color:#b91c1c;padding:8px;font-family:sans-serif"></div><script src="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/bpmn-viewer.development.js"></script><script src="./index.js"></script></body></html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/diagram-js.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/bpmn-js.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/bpmn-font/css/bpmn-embedded.css">
+  <style>
+    :root {
+      --accent: #2563eb;
+      --border: #e2e8f0;
+      --muted: #64748b;
+      --text: #0f172a;
+      --surface: #ffffff;
+      --surface-alt: #f8fafc;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+    body { font-family: "Source Sans Pro", "Segoe UI", system-ui, sans-serif; color: var(--text); }
+    #app {
+      display: flex; flex-direction: column; height: 600px;
+      border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface);
+    }
+    #toolbar {
+      display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
+      padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--surface-alt);
+    }
+    #toolbar .spacer { flex: 1; }
+    #toolbar .divider { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+    button {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      height: 30px; min-width: 30px; padding: 0 8px; border: 1px solid transparent; border-radius: 8px;
+      background: transparent; color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
+      white-space: nowrap;
+    }
+    button:hover:not(:disabled) { background: #eef2ff; border-color: #c7d2fe; }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    button:disabled { opacity: .45; cursor: default; }
+    button svg { width: 16px; height: 16px; flex: none; }
+    #zoom-level { min-width: 56px; font-variant-numeric: tabular-nums; color: var(--muted); }
+    #canvas-wrap { position: relative; flex: 1; min-height: 0; }
+    #canvas { position: absolute; inset: 0; cursor: grab;
+      background-image: radial-gradient(#e5e7eb 1px, transparent 1px); background-size: 16px 16px; }
+    #canvas:active { cursor: grabbing; }
+    #hint {
+      position: absolute; left: 10px; bottom: 8px; padding: 3px 8px; border-radius: 6px;
+      font-size: 12px; color: var(--muted); background: rgba(255,255,255,.85); pointer-events: none;
+    }
+    #message {
+      position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+      padding: 24px; text-align: center; color: #b91c1c; background: rgba(255,255,255,.92); font-size: 14px;
+    }
+    #message.visible { display: flex; }
+    .bjs-powered-by { opacity: .35; transform: scale(.7); transform-origin: bottom right; }
+    @media (max-width: 520px) { .label { display: none; } }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="toolbar" role="toolbar" aria-label="Diagram controls">
+      <button id="zoom-out" title="Zoom out (-)" aria-label="Zoom out">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M8 11h6M20 20l-3.5-3.5"/></svg>
+      </button>
+      <button id="zoom-level" title="Reset to 100% (0)" aria-label="Reset zoom to 100 percent">100%</button>
+      <button id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M8 11h6M11 8v6M20 20l-3.5-3.5"/></svg>
+      </button>
+      <button id="fit" title="Fit diagram to view (F)" aria-label="Fit diagram to view">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        <span class="label">Fit</span>
+      </button>
+      <span class="spacer"></span>
+      <button id="download-svg" title="Download as SVG image" aria-label="Download as SVG image" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+        <span class="label">SVG</span>
+      </button>
+      <button id="download-bpmn" title="Download BPMN 2.0 XML (opens in Camunda, Signavio, bpmn.io)" aria-label="Download BPMN file" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+        <span class="label">BPMN</span>
+      </button>
+    </div>
+    <div id="canvas-wrap">
+      <div id="canvas" tabindex="0" aria-label="Process diagram"></div>
+      <div id="hint">Scroll to zoom &middot; drag to pan</div>
+      <div id="message" role="alert"></div>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/bpmn-navigated-viewer.production.min.js"></script>
+  <script src="./index.js"></script>
+</body>
+</html>

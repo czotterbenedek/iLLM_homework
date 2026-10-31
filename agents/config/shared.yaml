@@ -1,0 +1,96 @@
+# Reusable prompt snippets. Reference them from any agent prompt as {{snippet_name}}.
+
+process_spec_format: |
+  PROCESS SPEC FORMAT
+  The process model is exchanged ONLY as this JSON structure. Diagram layout, coordinates
+  and BPMN XML are generated automatically by the tools - never write them yourself.
+
+  {
+    "name": "Order handling",
+    "lanes": [
+      {"id": "Lane_Sales", "name": "Sales"},
+      {"id": "Lane_Warehouse", "name": "Warehouse"}
+    ],
+    "nodes": [
+      {"id": "Start_OrderReceived", "type": "startEvent", "name": "Order received", "lane": "Lane_Sales", "trigger": "message"},
+      {"id": "Task_CheckOrder", "type": "userTask", "name": "Check order", "lane": "Lane_Sales"},
+      {"id": "Gateway_OrderValid", "type": "exclusiveGateway", "name": "Order valid?", "lane": "Lane_Sales"},
+      {"id": "Task_SendRejection", "type": "sendTask", "name": "Send rejection", "lane": "Lane_Sales"},
+      {"id": "End_OrderRejected", "type": "endEvent", "name": "Order rejected", "lane": "Lane_Sales"},
+      {"id": "Task_ShipGoods", "type": "manualTask", "name": "Ship goods", "lane": "Lane_Warehouse"},
+      {"id": "End_OrderShipped", "type": "endEvent", "name": "Order shipped", "lane": "Lane_Warehouse"}
+    ],
+    "flows": [
+      {"source": "Start_OrderReceived", "target": "Task_CheckOrder"},
+      {"source": "Task_CheckOrder", "target": "Gateway_OrderValid"},
+      {"source": "Gateway_OrderValid", "target": "Task_ShipGoods", "name": "Yes"},
+      {"source": "Gateway_OrderValid", "target": "Task_SendRejection", "name": "No"},
+      {"source": "Task_SendRejection", "target": "End_OrderRejected"},
+      {"source": "Task_ShipGoods", "target": "End_OrderShipped"}
+    ]
+  }
+
+  Field rules:
+  - nodes[].type is one of: startEvent, endEvent, intermediateCatchEvent, intermediateThrowEvent,
+    task, userTask, serviceTask, sendTask, receiveTask, manualTask, scriptTask, businessRuleTask,
+    subProcess, callActivity, exclusiveGateway, parallelGateway, inclusiveGateway, eventBasedGateway.
+  - nodes[].trigger is optional and only for events: message, timer, signal, conditional,
+    error (end events only), terminate (end events only).
+  - "lanes" is optional. When lanes are used, EVERY node needs a "lane" with an existing lane id.
+  - flows[].source and flows[].target are node ids. flows[].name is the condition label.
+  - Always send the COMPLETE model (all lanes, nodes and flows), never a fragment or a diff.
+
+modeling_guidelines: |
+  BPMN MODELING GUIDELINES
+
+  Structure
+  - Use one start event unless the user describes several independent triggers.
+  - Every path must finish in an end event. Use separate end events for different outcomes
+    and name each after its outcome ("Invoice paid", "Order rejected").
+  - Every element except start events has at least one incoming flow. Every element except
+    end events has at least one outgoing flow. No orphan or dead-end elements.
+  - Model the happy path first, in the order the user describes it, then add the exceptions.
+
+  Naming
+  - Tasks: verb + object in sentence case, 2-5 words ("Check credit limit", "Send invoice").
+    Never use generic names such as "Task 1" or "Process step".
+  - Exclusive and inclusive gateways that split: a short question ending with "?"
+    ("Credit approved?"). Label EVERY outgoing flow with the answer ("Yes" / "No" or the condition).
+  - Parallel gateways and gateways that only merge flows have an empty name.
+  - Events: object + past participle ("Payment received", "48 hours elapsed").
+  - Use the user's own business vocabulary and language.
+
+  Gateways
+  - exclusiveGateway: either/or decision ("if", "otherwise", "depending on").
+  - parallelGateway: activities that happen at the same time or independently ("meanwhile",
+    "in parallel", "both"). Close every parallel split with a parallelGateway join before the
+    branches continue together.
+  - inclusiveGateway: one or more branches may apply ("and/or").
+  - A task never has more than one outgoing flow - split with a gateway instead.
+  - Merge alternative branches with an exclusiveGateway only when they continue with a
+    common next step; otherwise give each branch its own end event.
+  - Loops ("repeat", "rework", "until correct", "send back") use an exclusiveGateway whose
+    flow points back to an earlier task.
+
+  Task types
+  - userTask: a person works in a software system.  manualTask: physical work without a system.
+  - serviceTask: done automatically by a system.  businessRuleTask: rule- or table-based decision.
+  - sendTask / receiveTask: sending a message / waiting for a message.  scriptTask: a script runs.
+  - subProcess: a summarised group of steps.  task: use when unsure.
+  - intermediateCatchEvent with trigger "timer" for waiting periods, "message" for waiting
+    for a reply.
+
+  Lanes
+  - Add lanes only when the user names roles, departments, people or systems.
+  - One lane per role; put each element in the lane of the role that performs it. Events and
+    gateways go into the lane of the surrounding work.
+
+  Scope
+  - Stay faithful to the user's description. Only add obviously implied elements (start/end
+    events, a gateway when the user says "if"). Do not invent departments, systems or approvals.
+  - Typical size is 3-15 tasks. Prefer a subProcess over very long sequences.
+
+  Ids
+  - Unique, readable ids with a type prefix: Start_, Task_, Gateway_, Event_, End_, Lane_.
+    Letters, digits and underscores only.
+  - When changing an existing model, keep the ids of all unchanged elements exactly as they are.

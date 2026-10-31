@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import re
-import uuid
 from collections.abc import Iterable
 from xml.etree import ElementTree as ET
+
+from models.schemas import Flow, Node, ProcessSpec
+
+from .layout import Bounds, compute_layout
 
 BPMN_NS = "http://www.omg.org/spec/BPMN/20100524/MODEL"
 BPMNDI_NS = "http://www.omg.org/spec/BPMN/20100524/DI"
@@ -14,9 +17,140 @@ ET.register_namespace("bpmndi", BPMNDI_NS)
 ET.register_namespace("dc", DC_NS)
 ET.register_namespace("di", DI_NS)
 
+_TRIGGER_ELEMENTS = {
+    "message": "messageEventDefinition",
+    "timer": "timerEventDefinition",
+    "signal": "signalEventDefinition",
+    "conditional": "conditionalEventDefinition",
+    "error": "errorEventDefinition",
+    "terminate": "terminateEventDefinition",
+}
 
-def _id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+def _unique(value: str, used: set[str]) -> str:
+    candidate = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    original, index = candidate, 2
+    while candidate in used:
+        candidate = f"{original}_{index}"
+        index += 1
+    used.add(candidate)
+    return candidate
+
+
+def _bounds(parent: ET.Element, bounds: Bounds, tag: str = "Bounds") -> None:
+    ET.SubElement(
+        parent,
+        f"{{{DC_NS}}}{tag}",
+        {"x": f"{bounds.x:g}", "y": f"{bounds.y:g}", "width": f"{bounds.width:g}", "height": f"{bounds.height:g}"},
+    )
+
+
+def build_bpmn_xml(spec: ProcessSpec) -> str:
+    """Render a normalized ProcessSpec as BPMN 2.0 XML including a generated diagram layout."""
+    layout = compute_layout(spec)
+    used = {node.id for node in spec.nodes} | {lane.id for lane in spec.lanes}
+    definitions = ET.Element(
+        f"{{{BPMN_NS}}}definitions",
+        {
+            "id": _unique("Definitions_1", used),
+            "targetNamespace": "http://bpmn.io/schema/bpmn",
+            "exporter": "BPMN Process Assistant",
+        },
+    )
+    process_id = _unique("Process_1", used)
+    collaboration = None
+    if spec.lanes:
+        collaboration = ET.SubElement(definitions, f"{{{BPMN_NS}}}collaboration", {"id": _unique("Collaboration_1", used)})
+        participant_id = _unique("Participant_1", used)
+        ET.SubElement(
+            collaboration,
+            f"{{{BPMN_NS}}}participant",
+            {"id": participant_id, "name": spec.name, "processRef": process_id},
+        )
+    process = ET.SubElement(
+        definitions,
+        f"{{{BPMN_NS}}}process",
+        {"id": process_id, "name": spec.name, "isExecutable": "false"},
+    )
+    if spec.lanes:
+        lane_set = ET.SubElement(process, f"{{{BPMN_NS}}}laneSet", {"id": _unique("LaneSet_1", used)})
+        for lane in spec.lanes:
+            lane_element = ET.SubElement(lane_set, f"{{{BPMN_NS}}}lane", {"id": lane.id, "name": lane.name})
+            for node in spec.nodes:
+                if node.lane == lane.id:
+                    ET.SubElement(lane_element, f"{{{BPMN_NS}}}flowNodeRef").text = node.id
+
+    flow_ids = [_unique(f"Flow_{flow.source}_{flow.target}", used) for flow in spec.flows]
+    for node in spec.nodes:
+        attributes = {"id": node.id}
+        if node.name:
+            attributes["name"] = node.name
+        if node.type == "subProcess":
+            attributes["triggeredByEvent"] = "false"
+        element = ET.SubElement(process, f"{{{BPMN_NS}}}{node.type}", attributes)
+        for flow_id, flow in zip(flow_ids, spec.flows):
+            if flow.target == node.id:
+                ET.SubElement(element, f"{{{BPMN_NS}}}incoming").text = flow_id
+        for flow_id, flow in zip(flow_ids, spec.flows):
+            if flow.source == node.id:
+                ET.SubElement(element, f"{{{BPMN_NS}}}outgoing").text = flow_id
+        if node.trigger in _TRIGGER_ELEMENTS:
+            ET.SubElement(
+                element,
+                f"{{{BPMN_NS}}}{_TRIGGER_ELEMENTS[node.trigger]}",
+                {"id": _unique(f"{node.id}_{node.trigger}", used)},
+            )
+    for flow_id, flow in zip(flow_ids, spec.flows):
+        attributes = {"id": flow_id, "sourceRef": flow.source, "targetRef": flow.target}
+        if flow.name:
+            attributes["name"] = flow.name
+        ET.SubElement(process, f"{{{BPMN_NS}}}sequenceFlow", attributes)
+
+    diagram = ET.SubElement(definitions, f"{{{BPMNDI_NS}}}BPMNDiagram", {"id": _unique("BPMNDiagram_1", used)})
+    plane = ET.SubElement(
+        diagram,
+        f"{{{BPMNDI_NS}}}BPMNPlane",
+        {
+            "id": _unique("BPMNPlane_1", used),
+            "bpmnElement": collaboration.attrib["id"] if collaboration is not None else process_id,
+        },
+    )
+    if layout.pool is not None:
+        shape = ET.SubElement(
+            plane,
+            f"{{{BPMNDI_NS}}}BPMNShape",
+            {"id": f"{participant_id}_di", "bpmnElement": participant_id, "isHorizontal": "true"},
+        )
+        _bounds(shape, layout.pool)
+    for lane in spec.lanes:
+        shape = ET.SubElement(
+            plane,
+            f"{{{BPMNDI_NS}}}BPMNShape",
+            {"id": _unique(f"{lane.id}_di", used), "bpmnElement": lane.id, "isHorizontal": "true"},
+        )
+        _bounds(shape, layout.lanes[lane.id])
+    for node in spec.nodes:
+        attributes = {"id": _unique(f"{node.id}_di", used), "bpmnElement": node.id}
+        if node.type == "exclusiveGateway":
+            attributes["isMarkerVisible"] = "true"
+        if node.type == "subProcess":
+            attributes["isExpanded"] = "false"
+        shape = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNShape", attributes)
+        _bounds(shape, layout.shapes[node.id])
+        if node.id in layout.shape_labels:
+            _bounds(ET.SubElement(shape, f"{{{BPMNDI_NS}}}BPMNLabel"), layout.shape_labels[node.id])
+    for flow_id, points, label in zip(flow_ids, layout.edges, layout.labels):
+        edge = ET.SubElement(
+            plane,
+            f"{{{BPMNDI_NS}}}BPMNEdge",
+            {"id": _unique(f"{flow_id}_di", used), "bpmnElement": flow_id},
+        )
+        for x, y in points:
+            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": f"{x:g}", "y": f"{y:g}"})
+        if label is not None:
+            _bounds(ET.SubElement(edge, f"{{{BPMNDI_NS}}}BPMNLabel"), label)
+    ET.indent(definitions)
+    return ET.tostring(definitions, encoding="unicode", xml_declaration=True)
 
 
 def _labels_from_text(text: str) -> list[str]:
@@ -34,41 +168,12 @@ def _normalise_labels(labels: Iterable[str]) -> list[str]:
 
 
 def generate_bpmn(labels: Iterable[str] | str, process_name: str = "Generated process") -> str:
-    """Create BPMN 2.0 XML with a deterministic horizontal layout."""
+    """Create BPMN 2.0 XML for a linear process with one task per label."""
     if isinstance(labels, str):
         labels = _labels_from_text(labels)
     labels = _normalise_labels(labels)
-    definitions = ET.Element(
-        f"{{{BPMN_NS}}}definitions",
-        {"id": _id("Definitions"), "targetNamespace": "http://example.com/bpmn"},
-    )
-    process = ET.SubElement(definitions, f"{{{BPMN_NS}}}process", {"id": _id("Process"), "name": process_name, "isExecutable": "false"})
-    start = ET.SubElement(process, f"{{{BPMN_NS}}}startEvent", {"id": _id("StartEvent"), "name": "Start"})
-    tasks = [
-        ET.SubElement(process, f"{{{BPMN_NS}}}task", {"id": _id("Task"), "name": label})
-        for label in labels
-    ]
-    end = ET.SubElement(process, f"{{{BPMN_NS}}}endEvent", {"id": _id("EndEvent"), "name": "End"})
-    nodes = [start, *tasks, end]
-    flows = []
-    for source, target in zip(nodes, nodes[1:]):
-        flow = ET.SubElement(process, f"{{{BPMN_NS}}}sequenceFlow", {"id": _id("Flow"), "sourceRef": source.attrib["id"], "targetRef": target.attrib["id"]})
-        flows.append(flow)
-
-    diagram = ET.SubElement(definitions, f"{{{BPMNDI_NS}}}BPMNDiagram", {"id": _id("BPMNDiagram")})
-    plane = ET.SubElement(diagram, f"{{{BPMNDI_NS}}}BPMNPlane", {"id": _id("BPMNPlane"), "bpmnElement": process.attrib["id"]})
-    shapes = [(start, 100, 180, 36, 36)]
-    shapes.extend((task, 180 + index * 160, 170, 100, 80) for index, task in enumerate(tasks))
-    shapes.append((end, 200 + len(tasks) * 160, 180, 36, 36))
-    for element, x, y, width, height in shapes:
-        shape = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNShape", {"id": _id("Shape"), "bpmnElement": element.attrib["id"]})
-        ET.SubElement(shape, f"{{{DC_NS}}}Bounds", {"x": str(x), "y": str(y), "width": str(width), "height": str(height)})
-    for index, flow in enumerate(flows):
-        edge = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNEdge", {"id": _id("Edge"), "bpmnElement": flow.attrib["id"]})
-        source_x = shapes[index][1] + shapes[index][3]
-        source_y = shapes[index][2] + shapes[index][4] / 2
-        target_x = shapes[index + 1][1]
-        target_y = shapes[index + 1][2] + shapes[index + 1][4] / 2
-        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(source_x), "y": str(source_y)})
-        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(target_x), "y": str(target_y)})
-    return ET.tostring(definitions, encoding="unicode", xml_declaration=True)
+    nodes = [Node("StartEvent_1", "startEvent", "Start")]
+    nodes.extend(Node(f"Task_{index}", "task", label) for index, label in enumerate(labels, start=1))
+    nodes.append(Node("EndEvent_1", "endEvent", "End"))
+    flows = [Flow(left.id, right.id) for left, right in zip(nodes, nodes[1:])]
+    return build_bpmn_xml(ProcessSpec(name=process_name, nodes=nodes, flows=flows))

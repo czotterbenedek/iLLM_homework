@@ -1,168 +1,303 @@
 from __future__ import annotations
 
-from pathlib import Path
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import streamlit as st
-from copilot._jsonrpc import JsonRpcError
-from streamlit.components.v1 import declare_component
 
 from agents.copilot_orchestrator import CopilotSupervisor
+from bpmn.spec import summarize_spec
+from components.bpmn_viewer import bpmn_viewer
+from models.schemas import GATEWAY_TYPES, TASK_TYPES
 
-st.set_page_config(page_title="Process diagram builder", layout="wide")
+st.set_page_config(
+    page_title="BPMN Process Assistant",
+    page_icon=":material/account_tree:",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+CHAT_HEIGHT = 540
+VIEWER_HEIGHT = 600
+USER_AVATAR = ":material/person:"
+ASSISTANT_AVATAR = ":material/smart_toy:"
+EXAMPLES = {
+    "Order handling": (
+        "Create an order handling process. A customer places an order and sales checks it. "
+        "If the order is valid, the warehouse picks and ships the goods while finance sends the invoice. "
+        "Otherwise sales sends a rejection to the customer."
+    ),
+    "Expense approval": (
+        "Model an expense approval process: an employee submits an expense report and the manager reviews it. "
+        "If information is missing, the report goes back to the employee for rework. "
+        "Approved reports are reimbursed by finance."
+    ),
+    "Employee onboarding": (
+        "Model employee onboarding with HR, IT and the team lead. HR prepares the contract; afterwards IT sets up "
+        "the laptop and accounts while the team lead plans the first week. Then the new employee starts."
+    ),
+    "Support ticket": (
+        "Create an IT support ticket process: a ticket is received and first-level support tries to solve it. "
+        "If it cannot be solved, it is escalated to second-level support. The customer is notified when it is closed."
+    ),
+}
+
 st.markdown(
     """
     <style>
-    :root {
-        --panel-border: #d9dee8;
-        --panel-radius: 14px;
-        --panel-background: #ffffff;
-    }
-
-    [data-testid="stAppViewContainer"] .main .block-container {
-        max-width: 1500px;
-        padding: 2rem 2.5rem 6rem;
-    }
-
-    [data-testid="stHorizontalBlock"] {
-        align-items: flex-start;
-        gap: 1.5rem;
-    }
-
-    [data-testid="stVerticalBlockBorderWrapper"] {
-        border: 1px solid var(--panel-border);
-        border-radius: var(--panel-radius);
-        background: var(--panel-background);
-        overflow: hidden;
-    }
-
-    [data-testid="stChatMessage"] {
-        margin: 0.35rem 0;
-        padding: 0.7rem 0.85rem;
-        border-radius: 10px;
-    }
-
-    [data-testid="stChatInput"] {
-        padding-bottom: 0.75rem;
-    }
-
-    [data-testid="stStatusWidget"] {
-        margin: 0.75rem 0;
-    }
-
-    @media (max-width: 900px) {
-        [data-testid="stAppViewContainer"] .main .block-container {
-            padding: 1rem 1rem 5rem;
-        }
-
-        [data-testid="stHorizontalBlock"] {
-            flex-direction: column;
-            gap: 1rem;
-        }
-    }
+    .block-container { padding-top: 2.2rem; padding-bottom: 1.5rem; max-width: 1600px; }
+    [data-testid="stHeaderActionElements"] { display: none; }
+    [data-testid="stChatMessage"] { padding: 0.6rem 0.75rem; border-radius: 12px; }
+    [data-testid="stChatMessageContent"] p:last-child { margin-bottom: 0; }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li { margin-bottom: 0.15rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "bpmn_xml" not in st.session_state:
-    st.session_state.bpmn_xml = None
-if "generation_active" not in st.session_state:
-    st.session_state.generation_active = False
-if "pending_prompt" not in st.session_state:
-    st.session_state.pending_prompt = None
-if "validation" not in st.session_state:
-    st.session_state.validation = None
-if "supervisor" not in st.session_state:
+DEFAULTS = {
+    "messages": [],
+    "spec": None,
+    "bpmn_xml": None,
+    "validation": None,
+    "job": None,
+    "job_started": 0.0,
+    "supervisor": None,
+    "supervisor_error": None,
+}
+for name, value in DEFAULTS.items():
+    if name not in st.session_state:
+        st.session_state[name] = value.copy() if isinstance(value, list) else value
+
+
+@st.cache_resource
+def _executor() -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(max_workers=4, thread_name_prefix="bpmn-agent")
+
+
+def connect() -> None:
+    st.session_state.supervisor_error = None
     try:
         st.session_state.supervisor = CopilotSupervisor()
-    except (JsonRpcError, RuntimeError, OSError, TimeoutError) as exc:
+    except Exception as exc:  # noqa: BLE001 - shown to the user, app stays usable
         st.session_state.supervisor = None
-        st.session_state.copilot_error = str(exc)
+        st.session_state.supervisor_error = str(exc) or exc.__class__.__name__
 
-if st.session_state.get("copilot_error"):
-    st.error(f"Unable to start the process assistant: {st.session_state.copilot_error}")
 
+def submit(prompt: str) -> None:
+    prompt = (prompt or "").strip()
+    supervisor = st.session_state.supervisor
+    if not prompt or supervisor is None or st.session_state.job is not None:
+        return
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.job = _executor().submit(supervisor.handle, prompt, st.session_state.spec)
+    st.session_state.job_started = time.monotonic()
+
+
+def submit_chat_input() -> None:
+    submit(st.session_state.get("chat_input") or "")
+
+
+def new_process() -> None:
+    st.session_state.messages = []
+    st.session_state.spec = None
+    st.session_state.bpmn_xml = None
+    st.session_state.validation = None
+    if st.session_state.supervisor is not None:
+        try:
+            st.session_state.supervisor.reset()
+        except Exception as exc:  # noqa: BLE001
+            st.session_state.supervisor = None
+            st.session_state.supervisor_error = f"Could not start a new conversation: {exc}"
+
+
+if st.session_state.supervisor is None and st.session_state.supervisor_error is None:
+    with st.spinner("Starting the process assistant..."):
+        connect()
+
+supervisor: CopilotSupervisor | None = st.session_state.supervisor
+busy = st.session_state.job is not None
+spec = st.session_state.spec
 has_model = bool(st.session_state.bpmn_xml)
-if has_model:
-    chat_column, diagram_column = st.columns([0.42, 0.58], gap="large")
-else:
-    chat_column = st.container()
-    diagram_column = None
 
-with chat_column:
-    st.subheader("Describe a process")
-    st.caption("Create a BPMN diagram or ask for changes to the current process.")
-    with st.container(height=560 if has_model else 400, border=has_model):
-        if not st.session_state.messages:
-            st.info("Start by describing the process you want to create.")
+# Sidebar -----------------------------------------------------------------------
+
+with st.sidebar:
+    st.markdown("### :material/account_tree: Process Assistant")
+    st.button(
+        "New process",
+        icon=":material/add:",
+        type="primary",
+        width="stretch",
+        on_click=new_process,
+        disabled=busy or (not st.session_state.messages and not has_model),
+    )
+
+    if spec is not None:
+        st.markdown("**Current model**")
+        counts = (
+            ("Tasks", sum(node.type in TASK_TYPES for node in spec.nodes)),
+            ("Gateways", sum(node.type in GATEWAY_TYPES for node in spec.nodes)),
+            ("Lanes", len(spec.lanes)),
+        )
+        for column, (label, count) in zip(st.columns(3), counts):
+            column.metric(label, count)
+
+    st.markdown("**Tips for good results**")
+    st.markdown(
+        "- Describe the steps in order and who performs them.\n"
+        "- Use *if … otherwise …* for decisions and *meanwhile* for parallel work.\n"
+        "- Name roles or departments to get swimlanes.\n"
+        "- Refine step by step, e.g. *Add a credit check after “Check order”*."
+    )
+    st.markdown("**Diagram controls**")
+    st.caption("Scroll to zoom, drag to pan, **F** to fit, **+ / −** to zoom. Download as SVG or BPMN from the toolbar.")
+
+    st.divider()
+    if supervisor is not None:
+        st.caption(f":material/check_circle: Connected · `{supervisor.model}`  \n{supervisor.base_url}")
+    else:
+        st.caption(":material/error: Assistant offline")
+        st.button("Retry connection", icon=":material/refresh:", on_click=connect, width="stretch")
+
+# Header ------------------------------------------------------------------------
+
+st.markdown("## BPMN Process Assistant")
+st.caption(
+    "Describe a business process in plain language. The assistant models it as a BPMN 2.0 diagram, "
+    "checks it, and refines it with you."
+)
+if st.session_state.supervisor_error:
+    st.error(
+        f"The process assistant is not available: {st.session_state.supervisor_error}  \n"
+        "Check that Ollama is running and the model is pulled, then use **Retry connection** in the sidebar.",
+        icon=":material/error:",
+    )
+
+
+def render_message(message: dict) -> None:
+    avatar = USER_AVATAR if message["role"] == "user" else ASSISTANT_AVATAR
+    with st.chat_message(message["role"], avatar=avatar):
+        if message.get("error"):
+            st.error(message["content"], icon=":material/error:")
         else:
-            for message in st.session_state.messages:
-                with st.chat_message(message["role"]):
-                    st.write(message["content"])
+            st.markdown(message["content"])
+        if message.get("changes"):
+            st.caption(" · ".join(message["changes"]))
 
-if diagram_column is not None:
-    with diagram_column:
-        st.subheader("Process preview")
-        with st.container(height=680, border=True):
-            validation = st.session_state.validation
-            if validation and not validation.valid:
-                st.warning("The latest draft has validation issues. You can still preview or ask for corrections.")
-                for error in validation.errors:
-                    st.caption(f"• {error}")
-            viewer = declare_component(
-                "bpmn_viewer",
-                path=str(Path(__file__).parent / "components" / "bpmn_viewer" / "frontend"),
-            )
-            export_svg = viewer(
-                xml=st.session_state.bpmn_xml,
-                key=f"bpmn-{hash(st.session_state.bpmn_xml)}",
-            )
-            if isinstance(export_svg, dict) and export_svg.get("error"):
-                st.error(f"Preview error: {export_svg['error']}")
-            elif export_svg:
-                st.download_button(
-                    "Download preview",
-                    export_svg,
-                    "process.svg",
-                    "image/svg+xml",
-                    disabled=st.session_state.generation_active,
+
+def render_welcome() -> None:
+    with st.container(border=True):
+        st.markdown("#### What process do you want to model?")
+        st.markdown(
+            "Explain the trigger, the steps, who does them and the decisions involved. "
+            "You can then ask for changes, such as adding steps, decisions or swimlanes."
+        )
+        st.caption("Try an example")
+        with st.container(horizontal=True, gap="small"):
+            for title, prompt in EXAMPLES.items():
+                st.button(
+                    title,
+                    help=prompt,
+                    on_click=submit,
+                    args=(prompt,),
+                    disabled=busy or supervisor is None,
+                    icon=":material/lightbulb:",
                 )
 
-if st.session_state.pending_prompt is None:
-    prompt = st.chat_input(
-        "Describe the process or request a change...",
-        disabled=st.session_state.supervisor is None or st.session_state.generation_active,
-    )
-    if prompt:
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        st.session_state.pending_prompt = prompt
-        st.session_state.generation_active = True
-        st.rerun()
-else:
-    st.chat_input(
-        "Generating the process...",
-        disabled=True,
-    )
-    with st.status("Building and checking the process...", expanded=False):
-        try:
-            response = st.session_state.supervisor.handle(
-                st.session_state.pending_prompt,
-                st.session_state.bpmn_xml,
-            )
-        except Exception as exc:
-            st.session_state.messages.append(
-                {"role": "assistant", "content": f"Process assistant error: {exc}"}
-            )
-        else:
-            if response.bpmn_xml:
-                st.session_state.bpmn_xml = response.bpmn_xml
+
+def finish_job(job: Future) -> None:
+    reply: dict = {"role": "assistant"}
+    try:
+        response = job.result()
+    except TimeoutError:
+        reply.update(error=True, content="The model took too long to answer. Try a shorter request or a faster model.")
+    except Exception as exc:  # noqa: BLE001 - surfaced in the chat
+        reply.update(error=True, content=f"Something went wrong while talking to the model: {exc}")
+    else:
+        reply.update(content=response.message, changes=response.changes)
+        if response.bpmn_xml:
+            st.session_state.bpmn_xml = response.bpmn_xml
+            st.session_state.spec = response.spec
             st.session_state.validation = response.validation
-            st.session_state.messages.append(
-                {"role": "assistant", "content": response.message}
-            )
-        finally:
-            st.session_state.pending_prompt = None
-            st.session_state.generation_active = False
-    st.rerun()
+    st.session_state.messages.append(reply)
+    st.session_state.job = None
+
+
+@st.fragment(run_every=1.0)
+def render_progress() -> None:
+    """Poll the background job; only this fragment reruns while the model is working."""
+    job: Future | None = st.session_state.job
+    if job is None:
+        return
+    if job.done():
+        finish_job(job)
+        st.rerun()
+    elapsed = int(time.monotonic() - st.session_state.job_started)
+    with st.chat_message("assistant", avatar=ASSISTANT_AVATAR):
+        st.status(f"Modeling and checking the process… {elapsed}s", state="running")
+
+
+def render_chat(height: int) -> None:
+    with st.container(height=height, border=True, autoscroll=True):
+        for message in st.session_state.messages:
+            render_message(message)
+        if busy:
+            render_progress()
+    render_chat_input()
+
+
+def render_chat_input() -> None:
+    st.chat_input(
+        "Ask for a change…" if has_model else "Describe your process…",
+        key="chat_input",
+        on_submit=submit_chat_input,
+        disabled=busy or supervisor is None,
+        max_chars=4000,
+    )
+
+
+def render_diagram() -> None:
+    validation = st.session_state.validation
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.markdown(f"**{spec.name if spec else 'Process'}**", help=summarize_spec(spec) if spec else None)
+        if validation is not None:
+            if not validation.valid:
+                st.badge("Needs attention", icon=":material/error:", color="red")
+            elif validation.warnings:
+                count = len(validation.warnings)
+                st.badge(f"{count} hint{'s' * (count != 1)}", icon=":material/info:", color="orange")
+            else:
+                st.badge("Valid BPMN", icon=":material/check_circle:", color="green")
+    bpmn_viewer(
+        st.session_state.bpmn_xml,
+        height=VIEWER_HEIGHT,
+        file_name=spec.name if spec else "process",
+        key="process_viewer",
+    )
+    if validation is not None and (validation.errors or validation.warnings):
+        with st.expander("Model check details", icon=":material/fact_check:"):
+            for error in validation.errors:
+                st.markdown(f":red[:material/error:] {error}")
+            for warning in validation.warnings:
+                st.markdown(f":orange[:material/info:] {warning}")
+            st.caption("Ask the assistant to fix these, e.g. “Fix the issues in the model check”.")
+
+
+# Main area ---------------------------------------------------------------------
+
+if has_model:
+    chat_column, diagram_column = st.columns([5, 7], gap="large")
+    with chat_column:
+        st.markdown("**Conversation**")
+        render_chat(CHAT_HEIGHT)
+    with diagram_column:
+        render_diagram()
+else:
+    _, center, _ = st.columns([1, 4, 1])
+    with center:
+        if st.session_state.messages:
+            render_chat(CHAT_HEIGHT - 60)
+        else:
+            render_welcome()
+            render_chat_input()
