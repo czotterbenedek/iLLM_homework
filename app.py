@@ -9,6 +9,60 @@ from streamlit.components.v1 import declare_component
 from agents.copilot_orchestrator import CopilotSupervisor
 
 st.set_page_config(page_title="Process diagram builder", layout="wide")
+st.markdown(
+    """
+    <style>
+    :root {
+        --panel-border: #d9dee8;
+        --panel-radius: 14px;
+        --panel-background: #ffffff;
+    }
+
+    [data-testid="stAppViewContainer"] .main .block-container {
+        max-width: 1500px;
+        padding: 2rem 2.5rem 6rem;
+    }
+
+    [data-testid="stHorizontalBlock"] {
+        align-items: flex-start;
+        gap: 1.5rem;
+    }
+
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        border: 1px solid var(--panel-border);
+        border-radius: var(--panel-radius);
+        background: var(--panel-background);
+        overflow: hidden;
+    }
+
+    [data-testid="stChatMessage"] {
+        margin: 0.35rem 0;
+        padding: 0.7rem 0.85rem;
+        border-radius: 10px;
+    }
+
+    [data-testid="stChatInput"] {
+        padding-bottom: 0.75rem;
+    }
+
+    [data-testid="stStatusWidget"] {
+        margin: 0.75rem 0;
+    }
+
+    @media (max-width: 900px) {
+        [data-testid="stAppViewContainer"] .main .block-container {
+            padding: 1rem 1rem 5rem;
+        }
+
+        [data-testid="stHorizontalBlock"] {
+            flex-direction: column;
+            gap: 1rem;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -38,17 +92,20 @@ else:
     diagram_column = None
 
 with chat_column:
-    st.title("Describe a process")
-    st.write("Create a BPMN diagram or ask for changes to the current process.")
-    with st.container(height=620, border=False):
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.write(message["content"])
+    st.subheader("Describe a process")
+    st.caption("Create a BPMN diagram or ask for changes to the current process.")
+    with st.container(height=560 if has_model else 400, border=has_model):
+        if not st.session_state.messages:
+            st.info("Start by describing the process you want to create.")
+        else:
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.write(message["content"])
 
 if diagram_column is not None:
     with diagram_column:
-        st.title("Process preview")
-        with st.container(height=700, border=True):
+        st.subheader("Process preview")
+        with st.container(height=680, border=True):
             validation = st.session_state.validation
             if validation and not validation.valid:
                 st.warning("The latest draft has validation issues. You can still preview or ask for corrections.")

@@ -7,7 +7,7 @@ const post = (type, payload = {}) => {
 
 const viewer = new window.BpmnJS({ container: "#canvas" });
 post("streamlit:componentReady", { apiVersion: 1 });
-post("streamlit:setFrameHeight", { height: 620 });
+post("streamlit:setFrameHeight", { height: 540 });
 window.addEventListener("message", async (event) => {
   const data = event.data;
   if (!data || !data.args || !data.args.xml) return;
